@@ -3,6 +3,7 @@ const { google } = require('googleapis');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const credentials = require('./credentials.json');
 dotenv.config();
+
 const documentId = process.env.DOCUMENT_ID;
 const genAI = new GoogleGenerativeAI(process.env.API_KEY);
 const docs = google.docs('v1');
@@ -23,6 +24,9 @@ const generationConfig = {
   maxOutputTokens: 8192,
   responseMimeType: "text/plain",
 };
+
+// Объект для хранения истории сообщений пользователей
+let userHistory = {};
 
 // Асинхронное получение записей из документа по айди документа
 async function getQAFromDocument() {
@@ -82,16 +86,34 @@ async function extractQAFromDocument(documentId) {
   });
   return qAndA;
 }
+
 // А тут уже загружаем в Gemini prompt, по которому вдальнейшем будет происходить все взаимодействие клиента и Gemini
-async function getResponse(userInput) {
+async function getResponse(userInput, userId) {
   if (qAndAData.length === 0) {
     console.log('QA Data not loaded yet');
     return 'Данные еще не загружены, попробуйте позже.';
   }
 
+  // Если история для пользователя еще не существует, создаем ее
+  if (!userHistory[userId]) {
+    userHistory[userId] = [];
+  }
+
+  // Добавляем запрос пользователя в историю
+  userHistory[userId].push({ role: "user", text: userInput });
+
   const chatSession = model.startChat({
     generationConfig,
     history: [
+      // Начинаем историю с сообщения пользователя
+      {
+        role: "user", 
+        parts: [{ text: userInput }],
+      },
+      ...userHistory[userId].slice(1).map(item => ({
+        role: item.role,  
+        parts: [{ text: item.text }],
+      })),
       {
         role: "user",
         parts: [
@@ -108,32 +130,39 @@ async function getResponse(userInput) {
             8. Попробуй максимально точно опознать точно ли вопросы пользователя не совпадают с вопросами из списка
             9. Если у тебя не получилось найти вопросы в предоставленном тебе списке, то добавь к твоему ответу в конце: Свяжитесь с менеджером.
             10. Запоминай историю сообщения вплоть до 3 сообщения
+            11. Отправляй только 1 ссылку, если таковая имеется в списке ответов
             ${qAndAData.map(data => `Вопрос: ${data.question}, Ответ: ${data.answer}`).join('\n')} 
           
             `// Последняя строчка для того, чтобы загрузить список вопросов и ответов нашему Gemini, по которому он вдальнейшем будет искать запрос пользователя
           },
         ],
       },
-    ],
+  ]
   });
-  // Проверки на введеный текст пользователем
+
   try {
     const result = await chatSession.sendMessage(userInput);
+    
+    // Добавляем ответ бота в историю, изменив роль на "model"
+    const botResponseText = typeof result.response.text === 'function' ? result.response.text() : result.response.text;
+    userHistory[userId].push({ role: "model", text: botResponseText });
 
-    if (typeof result.response.text === 'function') {
-      return result.response.text(); 
-    } else {
-      return result.response.text; 
+    // Ограничиваем историю, чтобы не переполнять сессию
+    if (userHistory[userId].length > 3) {
+      userHistory[userId].shift(); // Убираем самое старое сообщение
     }
+
+    return botResponseText;
   } catch (error) {
     console.error("Error:", error);
     return "Ошибка при получении ответа";
   }
 }
+
 // Сделали так, для дальнейшего получения ответа бота в файле bot.js
-async function botResponse(userInput){
+async function botResponse(userInput, userId) {
   try {
-    const response = await getResponse(userInput);
+    const response = await getResponse(userInput, userId);
     return response;
   } catch (err) {
     return `Ошибка: ${err}`;

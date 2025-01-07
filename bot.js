@@ -70,20 +70,20 @@ bot.on('text', async (ctx) => {
             return ctx.reply('Неверный код. Попробуйте снова.');
         }
     }
-     if (userStates[userId] === 'awaiting_client_code') {
-                userStates[userId].clientCode = userMessage; // Сохраняем код клиента
-                userStates[userId] = 'checking_address'; // Переводим в режим ожидания фото
-                return ctx.reply(`Код клиента "${userMessage}" сохранен. Теперь отправьте фотографию для проверки адреса.`);
-            }
+
+    if (userStates[userId] === 'awaiting_client_code') {
+        userStates[userId].clientCode = userMessage; // Сохраняем код клиента
+        userStates[userId] = 'awaiting_photo'; // Ожидаем фотографию
+        return ctx.reply(`Код клиента "${userMessage}" сохранен. Теперь отправьте фотографию для проверки адреса.`);
+    }
 
     // Проверка на админа и начало рассылки
     if (userStates[userId] === 'sending_news') {
         const newsMessage = userMessage;
         userStates[userId] = 'admin';
         await ctx.reply('Рассылка начата. Ожидайте завершения.');
-
         await handleNewsBroadcast(ctx, newsMessage);
-        return showAdminPanel(ctx); 
+        return showAdminPanel(ctx);
     }
 
     // Обработка всех видов сообщений боту
@@ -120,47 +120,72 @@ bot.on('text', async (ctx) => {
                     return ctx.reply('Произошла ошибка при обработке вашего вопроса.');
                 }
             }
-
-
-
             return ctx.reply('Вы выбрали несуществующую функцию.');
     }
 });
 
-// Обработка фото
 bot.on('photo', async (ctx) => {
     const userId = ctx.chat.id;
 
-    // Проверка, что код клиента был введен
-    if (userStates[userId] === 'checking_address' && userStates[userId].clientCode) {
+    // Проверка, что код клиента был введен и бот ожидает фото
+    if (userStates[userId] === 'awaiting_photo' && userStates[userId].clientCode) {
         try {
             await ctx.reply('Обрабатываю изображение...');
-            const photo = ctx.message.photo[ctx.message.photo.length - 1];
+
+            // Получаем ссылку на изображение
+            const photo = ctx.message.photo[ctx.message.photo.length - 1];  // Получаем самое высокое качество фотографии
             const fileId = photo.file_id;
             const fileLink = await ctx.telegram.getFileLink(fileId);
 
-            // Скачивание фото
+            if (!fileLink) {
+                return ctx.reply('Не удалось получить ссылку на изображение.');
+            }
+
+            console.log(`File Link: ${fileLink.href}`); // Логируем ссылку на файл
+
+            // Скачивание изображения
             const filePath = `temp_image_${Date.now()}.jpg`;
             const response = await axios.get(fileLink.href, { responseType: 'stream' });
             const writer = fs.createWriteStream(filePath);
             response.data.pipe(writer);
 
+            // Ожидаем завершения записи изображения
             await new Promise((resolve, reject) => {
                 writer.on('finish', resolve);
                 writer.on('error', reject);
             });
+            console.log('Изображение успешно сохранено'); // Логируем успешное сохранение
 
-            // Применение OCR с Tesseract.js
-            const { data: { text } } = await Tesseract.recognize(filePath, 'chi_tra'); // Используйте 'chi_tra' для китайского или другие языки
-            fs.unlinkSync(filePath); // Удаление временного файла
+            // Применение OCR с Tesseract.js для извлечения текста
+            const { data: { text } } = await Tesseract.recognize(filePath, 'chi_sim'); // Применяйте 'chi_sim' или 'chi_tra' в зависимости от нужного
+            console.log(`Извлечённый текст: ${text.trim()}`); // Логируем извлечённый текст
 
             await ctx.reply(`Извлечённый текст:\n"${text.trim()}"`);
 
             // Валидация адреса
             if (validateAddress(userStates[userId].clientCode, text)) {
-                return ctx.reply('Адрес указан корректно!');
+                // После успешной валидации возвращаем пользователя в главное меню или состояние
+                userStates[userId] = null; // Сброс состояния, чтобы выйти из режима проверки
+                return ctx.reply('Адрес указан корректно! Возвращаемся в главное меню.', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: 'Задать вопрос' }, { text: 'Проверить правильность адреса' }],
+                            [{ text: 'Связь с менеджером' }]
+                        ],
+                        resize_keyboard: true
+                    }
+                });
             } else {
-                return ctx.reply('Похоже, что адрес указан неверно.');
+                userStates[userId] = null; // Сброс состояния после неудачной проверки
+                return ctx.reply('Похоже, что адрес указан неверно. Возвращаемся в главное меню.', {
+                    reply_markup: {
+                        keyboard: [
+                            [{ text: 'Задать вопрос' }, { text: 'Проверить правильность адреса' }],
+                            [{ text: 'Связь с менеджером' }]
+                        ],
+                        resize_keyboard: true
+                    }
+                });
             }
         } catch (error) {
             console.error(error);
@@ -171,6 +196,22 @@ bot.on('photo', async (ctx) => {
     }
 });
 
+
+// Функция для валидации адреса
+function validateAddress(clientCode, extractedText) {
+    const rightAddress = `努尔波${clientCode}  13078833342 广东省 佛山市 南海区  里水镇新联工业区工业大道东一路3号航达В01库区${clientCode}号`;
+
+    // Логирование текста для отладки
+    console.log(`Правильный адрес: ${rightAddress}`);
+    console.log(`Извлечённый адрес: ${extractedText.trim()}`);
+
+    // Проверяем соответствие адресов
+    if (rightAddress === extractedText.trim()) {
+        return true;
+    } else {
+        return false;
+    }
+}
 // По названию надеюсь понятно...
 function showAdminPanel(ctx) {
     ctx.reply('Добро пожаловать в админ-панель! Выберите действие:', {
@@ -183,15 +224,6 @@ function showAdminPanel(ctx) {
             ],
         },
     });
-}
-
-function validateAddress(clientCode, extractedText) {
-    // Логика валидации адреса с использованием clientCode и извлеченного текста
-    if (extractedText.includes(clientCode)) {
-        return true;
-    } else {
-        return false;
-    }
 }
 
 // Обработка всех штук снизу сообщения
