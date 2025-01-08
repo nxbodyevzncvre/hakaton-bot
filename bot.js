@@ -3,19 +3,44 @@ const dotenv = require('dotenv');
 const botResponse = require("./index.js");
 const fs = require('fs');
 const axios = require('axios');
-const Tesseract = require('tesseract.js'); // Ensure Tesseract.js is installed
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { GoogleAIFileManager } = require("@google/generative-ai/server");
+const path = require('path')
+const bcrypt = require('bcrypt');
 dotenv.config();
 
+const genAI = new GoogleGenerativeAI(process.env.API_KEY);
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+// Проверка пароля
+async function checkPassword(inputPassword, storedHash) {
+    return await bcrypt.compare(inputPassword, storedHash);
+}
+
+// Пример использования
+async function verifyAdminPassword(inputPassword) {
+    const storedHash = process.env.ADMIN_PASSWORD_HASH;  // Хеш пароля из переменных окружения
+    const isPasswordValid = await checkPassword(inputPassword, storedHash);  // Проверка пароля с использованием bcrypt
+    return isPasswordValid;  // Возвращаем результат
+}
+
+const fileManager = new GoogleAIFileManager(process.env.API_KEY);
+const model = genAI.getGenerativeModel({
+    model: "gemini-1.5-flash",
+  });
+
 let userStates = {};
 let users = new Set();
+let users_Broadcast = new Set()
 
 // Загрузка логов в файл user_logs.txt
-function logMessageToFile(username, userMessage, botResponse) {
+async function logMessageToFile(username, userMessage, botResponse) {
     const logMessage = `Имя: ${username}, Сообщение: ${userMessage}, Ответ бота: ${botResponse}\n`;
-    fs.appendFileSync('./logs/users_logs.txt', logMessage, 'utf8');
+    try {
+        await fs.promises.appendFile('./logs/users_logs.txt', logMessage, 'utf8');
+    } catch (error) {
+        console.error('Ошибка при записи логов:', error);
+    }
 }
 
 // Функция для отправки логов администратору
@@ -32,8 +57,10 @@ async function sendLogsToAdmin(ctx) {
 
 // Начало бота
 bot.start((ctx) => {
-    const userId = ctx.chat.id;
-    users.add(userId);
+    const chatId = ctx.chat.id;
+    const username = ctx.message.chat.username
+    users[username] = chatId;
+    
     ctx.reply('Привет! Я бот, который может помочь тебе с вопросами, связанные с SilkWay Cargo. Также, я проверяю на правильность заполненную адресную строку в таких приложениях, как: Pinduoduo, 1688, Alibaba, Taobao', {
         reply_markup: {
             keyboard: [
@@ -49,38 +76,69 @@ bot.start((ctx) => {
     });
 });
 
+bot.hears('Подписаться', (ctx) => {
+    const username = ctx.message.chat.username;
+    const chatId = ctx.chat.id;
+
+    if (!users_Broadcast[username]) {  // Если пользователя нет в объекте
+        users_Broadcast[username] = chatId; // Подписываем пользователя
+        ctx.reply('Вы успешно подписались на рассылку!');
+    } else {
+        ctx.reply('Вы уже подписаны.');
+    }
+});
+
+bot.hears('Отписаться', (ctx) => {
+    const username = ctx.message.chat.username;
+
+    if (users_Broadcast[username]) {  // Если пользователь есть в объекте
+        delete users_Broadcast[username]; // Отписываем пользователя
+        ctx.reply('Вы успешно отписались от рассылки!');
+    } else {
+        ctx.reply('Вы не были подписаны.');
+    }
+});
+
+
 // /admin
 bot.command('admin', (ctx) => {
     const userId = ctx.chat.id;
-    userStates[userId] = 'awaiting_admin_code';
+    userStates[userId] = { state: 'awaiting_admin_code' };
     ctx.reply('Введите секретный код для доступа к админ-панели:');
 });
 
-// Основные проверки на введеный текст пользователем
+// Обработка всех текстовых сообщений
 bot.on('text', async (ctx) => {
     const userId = ctx.chat.id;
     const userMessage = ctx.message.text;
 
+    // Инициализируем состояние пользователя, если его нет
+    if (!userStates[userId]) {
+        userStates[userId] = { state: null };
+    }
+
     // Получение админ токена
-    if (userStates[userId] === 'awaiting_admin_code') {
-        if (userMessage === ADMIN_PASSWORD) {
-            userStates[userId] = 'admin';
+    if (userStates[userId].state === 'awaiting_admin_code') {
+        const isPasswordValid = await verifyAdminPassword(userMessage);  // Ожидаем результат асинхронной проверки пароля
+        if (isPasswordValid) {
+            userStates[userId] = { state: 'admin' };
             return showAdminPanel(ctx);
         } else {
             return ctx.reply('Неверный код. Попробуйте снова.');
         }
     }
 
-    if (userStates[userId] === 'awaiting_client_code') {
+    if (userStates[userId].state === 'awaiting_client_code') {
         userStates[userId].clientCode = userMessage; // Сохраняем код клиента
-        userStates[userId] = 'awaiting_photo'; // Ожидаем фотографию
+        userStates[userId].state = 'awaiting_photo'; // Переводим в состояние ожидания фотографии
+
         return ctx.reply(`Код клиента "${userMessage}" сохранен. Теперь отправьте фотографию для проверки адреса.`);
     }
 
     // Проверка на админа и начало рассылки
-    if (userStates[userId] === 'sending_news') {
+    if (userStates[userId].state === 'sending_news') {
         const newsMessage = userMessage;
-        userStates[userId] = 'admin';
+        userStates[userId] = { state: 'admin' };
         await ctx.reply('Рассылка начата. Ожидайте завершения.');
         await handleNewsBroadcast(ctx, newsMessage);
         return showAdminPanel(ctx);
@@ -89,29 +147,28 @@ bot.on('text', async (ctx) => {
     // Обработка всех видов сообщений боту
     switch (userMessage) {
         case 'Связь с менеджером':
-            return ctx.reply('Связь с менеджером: https://wa.me/1234567890');
+            return ctx.reply('Связь с менеджером: https://api.whatsapp.com/send?phone=77055188988&text=');
         case 'Подписаться':
             return ctx.reply('Вы успешно подписались на обновления!');
         case 'Отписаться':
             return ctx.reply('Вы успешно отписались от обновлений!');
         case 'Задать вопрос':
-            userStates[userId] = 'asking_question';
+            userStates[userId] = { state: 'asking_question' };
             return ctx.reply('Задайте ваш вопрос. Для выхода выберите другое действие.');
         case 'Проверить правильность адреса':
-            userStates[userId] = 'awaiting_client_code'; // Ожидаем код клиента
+            userStates[userId] = { state: 'awaiting_client_code' }; // Ожидаем код клиента
             ctx.reply('Отправьте индивидуальный код клиента для проверки адреса.');
             break;
-
         default:
-            if (userStates[userId] === 'asking_question') {
+            if (userStates[userId].state === 'asking_question') {
                 try {
                     const response = await botResponse(userMessage);                
-                    logMessageToFile(ctx.message.chat.first_name, userMessage, response);
+                    logMessageToFile(ctx.message.chat.username, userMessage, response);
                     return ctx.reply(response, {
                         reply_markup: {
                             inline_keyboard: [
-                                [{ text: 'Вернуться в главное меню', callback_data: 'main_menu' }], 
-                                [{ text: 'Связаться с менеджером', url: 'https://wa.me/1234567890' }]
+                                [{ text: 'Вернуться в главное меню', callback_data: 'main_menu' }],
+                                [{ text: 'Связаться с менеджером', url: 'https://api.whatsapp.com/send?phone=77055188988&text=' }]
                             ],
                         },
                     });
@@ -124,16 +181,17 @@ bot.on('text', async (ctx) => {
     }
 });
 
+
+
 bot.on('photo', async (ctx) => {
     const userId = ctx.chat.id;
-
-    // Проверка, что код клиента был введен и бот ожидает фото
-    if (userStates[userId] === 'awaiting_photo' && userStates[userId].clientCode) {
+    // Ожидаем фото
+    if (userStates[userId]?.state === 'awaiting_photo') {
         try {
             await ctx.reply('Обрабатываю изображение...');
 
             // Получаем ссылку на изображение
-            const photo = ctx.message.photo[ctx.message.photo.length - 1];  // Получаем самое высокое качество фотографии
+            const photo = ctx.message.photo[ctx.message.photo.length - 1];
             const fileId = photo.file_id;
             const fileLink = await ctx.telegram.getFileLink(fileId);
 
@@ -141,77 +199,84 @@ bot.on('photo', async (ctx) => {
                 return ctx.reply('Не удалось получить ссылку на изображение.');
             }
 
-            console.log(`File Link: ${fileLink.href}`); // Логируем ссылку на файл
-
             // Скачивание изображения
-            const filePath = `temp_image_${Date.now()}.jpg`;
+            const filePath = `adresses/temp_image_${Date.now()}.png`;
             const response = await axios.get(fileLink.href, { responseType: 'stream' });
             const writer = fs.createWriteStream(filePath);
             response.data.pipe(writer);
 
-            // Ожидаем завершения записи изображения
             await new Promise((resolve, reject) => {
                 writer.on('finish', resolve);
                 writer.on('error', reject);
             });
-            console.log('Изображение успешно сохранено'); // Логируем успешное сохранение
 
-            // Применение OCR с Tesseract.js для извлечения текста
-            const { data: { text } } = await Tesseract.recognize(filePath, 'chi_sim'); // Применяйте 'chi_sim' или 'chi_tra' в зависимости от нужного
-            console.log(`Извлечённый текст: ${text.trim()}`); // Логируем извлечённый текст
+            console.log('Изображение успешно сохранено');
+            const name = path.parse(filePath).name;
+            // запрос ии
+            const query = `
+                Ты бот компании SilkWay. Пользователь тебе дает скриншот, сравни текст, 
+                написанный пользователем на китайском языке, с тем текстом, который у тебя есть.
+                Если данные введены правильно, напиши: "Все заполнено правильно".
+                ВНИМАТЕЛЬНО ПРОСМОТРИ ВСЕ ИЕРОГЛИФЫ
+                Если иероглифы одинаковы, скажи, что все заполнено верно и все ничего больше
+                Не обращай внимания на пробелы
+                Заверши разговор в любом случае.
+                Только не затягивай максимум 1 предложение в строгом формальном стиле
+                Не обращай внимания на запятые
+                Правильный адресс тот, который у тебя есть, а точнее, с которым ты сравниваешь
 
-            await ctx.reply(`Извлечённый текст:\n"${text.trim()}"`);
+                Данные для проверки:
+                努尔波${userStates[userId].clientCode} 13078833342广东省佛山市南海区里水镇新联工业区工业大道东一路3号航达B01库区 ${userStates[userId].clientCode}号
 
-            // Валидация адреса
-            if (validateAddress(userStates[userId].clientCode, text)) {
-                // После успешной валидации возвращаем пользователя в главное меню или состояние
-                userStates[userId] = null; // Сброс состояния, чтобы выйти из режима проверки
-                return ctx.reply('Адрес указан корректно! Возвращаемся в главное меню.', {
-                    reply_markup: {
-                        keyboard: [
-                            [{ text: 'Задать вопрос' }, { text: 'Проверить правильность адреса' }],
-                            [{ text: 'Связь с менеджером' }]
-                        ],
-                        resize_keyboard: true
-                    }
-                });
+            `;
+            // фотку ии отправляем
+            const uploadResult = await fileManager.uploadFile(
+                `${filePath}`,
+                {
+                  mimeType: "image/png",
+                  displayName: name,
+                },
+              );
+
+              const result = await model.generateContent([
+                `${query}`,
+                {
+                  fileData: {
+                    fileUri: uploadResult.file.uri,
+                    mimeType: uploadResult.file.mimeType,
+                  },
+                },
+              ]); 
+
+            // Обработка результата
+            if (result && result.response && result.response.candidates) {
+                const candidates = result.response.candidates;
+                const firstCandidateText = candidates[0].content.parts;
+                let arr = []
+
+                candidates[0].content.parts.forEach((el) => {
+                    arr.push(el.text)
+                }) 
+                console.log(arr[0])
+                
+
+                console.log(`Результат обработки: ${firstCandidateText}`);
+                await ctx.reply(`${arr[0]}`);
             } else {
-                userStates[userId] = null; // Сброс состояния после неудачной проверки
-                return ctx.reply('Похоже, что адрес указан неверно. Возвращаемся в главное меню.', {
-                    reply_markup: {
-                        keyboard: [
-                            [{ text: 'Задать вопрос' }, { text: 'Проверить правильность адреса' }],
-                            [{ text: 'Связь с менеджером' }]
-                        ],
-                        resize_keyboard: true
-                    }
-                });
+                console.log('Ответ модели отсутствует или некорректен.');
+                await ctx.reply('Не удалось обработать изображение. Попробуйте еще раз.');
             }
+
         } catch (error) {
-            console.error(error);
-            return ctx.reply('Произошла ошибка при обработке изображения.');
+            console.error(`Ошибка: ${error.message}`);
+            await ctx.reply('Произошла ошибка при обработке изображения.');
         }
     } else {
-        return ctx.reply('Пожалуйста, сначала отправьте код клиента для проверки адреса.');
+        await ctx.reply('Пожалуйста, сначала отправьте код клиента для проверки адреса.');
     }
 });
 
 
-// Функция для валидации адреса
-function validateAddress(clientCode, extractedText) {
-    const rightAddress = `努尔波${clientCode}  13078833342 广东省 佛山市 南海区  里水镇新联工业区工业大道东一路3号航达В01库区${clientCode}号`;
-
-    // Логирование текста для отладки
-    console.log(`Правильный адрес: ${rightAddress}`);
-    console.log(`Извлечённый адрес: ${extractedText.trim()}`);
-
-    // Проверяем соответствие адресов
-    if (rightAddress === extractedText.trim()) {
-        return true;
-    } else {
-        return false;
-    }
-}
 // По названию надеюсь понятно...
 function showAdminPanel(ctx) {
     ctx.reply('Добро пожаловать в админ-панель! Выберите действие:', {
@@ -219,6 +284,7 @@ function showAdminPanel(ctx) {
             inline_keyboard: [
                 [{ text: '📢 Рассылка новостей', callback_data: 'send_news' }],
                 [{ text: '👥 Список пользователей', callback_data: 'list_users' }],
+                [{ text: '👥 📢 Список пользователей c рассылкой', callback_data: 'list_broadcast_users' }],
                 [{ text: '✉ Получить логи', callback_data: 'logs' }],
                 [{ text: '🔙 Выйти из панели', callback_data: 'exit_admin' }],
             ],
@@ -231,21 +297,32 @@ bot.on('callback_query', async (ctx) => {
     const userId = ctx.chat.id;
     const option = ctx.callbackQuery.data;
 
-    if (userStates[userId] !== 'admin') {
-        return ctx.reply('У вас нет доступа к этой функции.');
-    }
 
     switch (option) {
         case 'send_news':
-            userStates[userId] = 'sending_news';
+            userStates[userId] = { state: 'sending_news' };
             return ctx.reply('Введите текст новости для рассылки:');
         case 'logs':
             return sendLogsToAdmin(ctx);
         case 'list_users':
-            return ctx.reply(`Всего пользователей: ${users.size}`);
+            let users_default = [];
+            for (const username in users) {
+                users_default.push(username); // Добавляем только username
+            }
+            return ctx.reply(`Всего пользователей:\n${users_default.join('\n')}`);
+        case 'list_broadcast_users':
+            let users_with_broadcast = [];
+            for (const username in users_Broadcast) {
+                users_with_broadcast.push(username); // Добавляем только username
+            }
+            // Отправляем сообщение с перечислением пользователей
+            return ctx.reply(`Всего пользователей с подпиской:\n${users_with_broadcast.join('\n')}`);
+    
         case 'exit_admin':
-            userStates[userId] = null;
+            userStates[userId] = { state: null };
             return ctx.reply('Вы вышли из админ-панели.');
+        case 'main_menu': 
+            return ctx.reply('Вы вернулись в главное меню.');
         default:
             return ctx.reply('Неизвестная команда.');
     }
@@ -256,18 +333,22 @@ async function handleNewsBroadcast(ctx, message) {
     let successCount = 0;
     let failCount = 0;
 
-    for (const userId of users) {
+    // Итерируем по ключам объекта users_Broadcast, где ключ — это username, а значение — chatId
+    for (const username in users_Broadcast) {
+        const chatId = users_Broadcast[username];
         try {
-            await ctx.telegram.sendMessage(userId, `📢 Новости:\n${message}`);
+            await ctx.telegram.sendMessage(chatId, `📢 Новости:\n${message}`);
             successCount++;
         } catch (error) {
-            console.error(`Ошибка отправки для пользователя ${userId}:`, error);
+            console.error(`Ошибка отправки для пользователя ${chatId}:`, error);
             failCount++;
         }
     }
 
+    // Ответ после рассылки
     ctx.reply(`Рассылка завершена. Успешно отправлено: ${successCount}, Ошибок: ${failCount}`);
 }
+
 
 // Успешный запуск бота
 bot.launch().then(() => {
