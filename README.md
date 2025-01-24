@@ -1,6 +1,28 @@
-Telegram bot which was made for Nis-Hakaton for city cargo company SilkWay. 
-Contains ai chat bot which can speak based on the context, speaks only about the themes that are in the google docs
-Has subscribe, unsubscribe system for broadcasting news
-Can work with images and get info from them such as text, the goal of that is to check users filled adress from application.
-Has its own admin panel, password from it is encrypted, so no one can go to the panel.
-In admin panel, you can send broadcast  message and it will send the new to EVERYONE how is in the subscribe list.
+# SilkWay Cargo Telegram Bot 🚚🤖  
+
+A Telegram bot developed for the NIS-Hackathon for the city cargo company **SilkWay**. This bot leverages AI capabilities and advanced functionality to streamline communication and ensure efficient management of user interactions.  
+
+## 💻 Features  
+### 🤖 AI Chatbot  
+- Context-aware AI that answers only questions relevant to pre-defined themes from Google Docs.  
+- Ensures focused and relevant user interactions.  
+
+### 📰 News Broadcast System  
+- **Subscribe/Unsubscribe** system for users to manage notifications.  
+- Sends broadcast messages to all subscribed users, keeping them updated with the latest news.  
+
+### 🖼️ Image Processing  
+- Processes user-uploaded images to extract information (e.g., text).  
+- Verifies user-submitted addresses from application forms.  
+
+### 🔐 Admin Panel  
+- Secure admin panel with encrypted password protection.  
+- Admins can:  
+  - Send broadcast messages to all subscribed users.  
+  - Manage and monitor bot activities.  
+
+## 💻 Tech Stack  
+-  **Node.js**
+- **Telegram API** for bot interactions  
+- **AI:** Integrated with Gemini AI API for context-aware conversations  
+
